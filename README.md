@@ -110,7 +110,7 @@ Monitor extension activity:
 
 ## Configuration Options
 
-### Settings Panel
+### Settings Panel - Tool Interception
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Mirror from Proxy | Mirror requests from Proxy tool | ✓ Enabled |
@@ -119,6 +119,14 @@ Monitor extension activity:
 | Mirror from Intruder | Mirror requests from Intruder | Disabled |
 | Mirror from Extensions | Mirror requests from other extensions | Disabled |
 | Auto-refresh Mirrors | Update mirror sessions when primary refreshes | ✓ Enabled |
+
+### Settings Panel - Resource Limits
+| Setting | Description | Default | Range |
+|---------|-------------|---------|-------|
+| Max stored results | Maximum results to keep in memory | 1,000 | 10-100,000 |
+| Max concurrent mirrors | Simultaneous mirror threads | 10 | 1-50 |
+| Request timeout | Seconds to wait per request | 15 | 1-120 |
+| Max diff lines | Lines shown in diff view | 500 | 50-10,000 |
 
 ### Results Panel
 | Setting | Description | Default |
@@ -166,14 +174,15 @@ The extension compares:
 4. Increase timeout if needed (default: 15 seconds)
 
 ### High Memory Usage
-The extension includes safeguards:
-- Maximum 1000 results stored (oldest auto-removed)
-- Maximum 10 concurrent mirror threads
+The extension includes configurable safeguards (Settings tab → Resource Limits):
+- Increase/decrease max stored results as needed
+- Adjust max concurrent mirrors for your system
 - Large responses may still consume memory
 
 Consider:
 - Clearing results periodically
 - Saving sessions and clearing
+- Reducing max stored results for long sessions
 - Disabling Scanner/Intruder mirroring for high-volume scans
 
 ### Extension Causing Issues
@@ -189,15 +198,20 @@ Consider:
 - Extension detects and skips its own requests
 - Safe to enable "Extensions" tool interception
 
-### Resource Limits
-- Maximum 1000 stored results (auto-cleanup of oldest)
-- Maximum 10 concurrent mirror threads
-- 15-second request timeout
-- All threads marked as daemon (won't prevent Burp exit)
+### Resource Limits (Configurable)
+All limits can be adjusted in the Settings tab:
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| Max stored results | 1,000 | 10-100,000 | Results auto-cleanup when exceeded |
+| Max concurrent mirrors | 10 | 1-50 | Requests skipped when exceeded |
+| Request timeout | 15s | 1-120s | Per mirror request |
+| Max diff lines | 500 | 50-10,000 | Prevents UI freeze on large diffs |
 
 ### Thread Safety
 - All shared data protected by locks
 - UI updates via SwingUtilities.invokeLater()
+- All threads marked as daemon (won't prevent Burp exit)
 - Safe concurrent access to domains and results
 
 ## Export Formats

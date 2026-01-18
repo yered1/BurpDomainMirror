@@ -122,6 +122,8 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         self._active_mirror_threads = 0
         self._max_concurrent_mirrors = 10  # Maximum concurrent mirror threads
         self._mirror_thread_lock = Lock()
+        self._request_timeout = 15  # Seconds to wait for mirror responses
+        self._max_diff_lines = 500  # Maximum lines to show in diff view
         
         # Build UI
         self._build_ui()
@@ -1205,12 +1207,11 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                     doc.insertString(doc.getLength(), "UNIFIED DIFF:\n", header_style)
                     
                     diff_line_count = 0
-                    max_diff_lines = 500  # Limit diff output
                     
                     for line in diff:
-                        if diff_line_count >= max_diff_lines:
+                        if diff_line_count >= self._max_diff_lines:
                             doc.insertString(doc.getLength(), 
-                                "\n... [diff truncated, showing first {} lines]\n".format(max_diff_lines), 
+                                "\n... [diff truncated, showing first {} lines]\n".format(self._max_diff_lines), 
                                 sep_style)
                             break
                         
@@ -1562,12 +1563,64 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         self._auto_refresh_checkbox = JCheckBox("Auto-refresh mirrors when primary refreshes", True)
         options_panel.add(self._auto_refresh_checkbox)
         settings.add(options_panel)
+        settings.add(JLabel(" "))
+        
+        # === RESOURCE LIMITS SECTION ===
+        limits_panel = JPanel()
+        limits_panel.setLayout(BoxLayout(limits_panel, BoxLayout.Y_AXIS))
+        limits_panel.setBorder(BorderFactory.createTitledBorder("Resource Limits"))
+        limits_panel.setMaximumSize(Dimension(800, 180))
+        
+        # Max results row
+        max_results_row = JPanel(FlowLayout(FlowLayout.LEFT))
+        max_results_row.add(JLabel("Max stored results:"))
+        self._max_results_field = JTextField(str(self._max_results), 8)
+        self._max_results_field.setToolTipText("Maximum number of results to keep (oldest are removed when exceeded)")
+        max_results_row.add(self._max_results_field)
+        max_results_row.add(JLabel("  (oldest auto-removed when exceeded)"))
+        limits_panel.add(max_results_row)
+        
+        # Max concurrent threads row
+        max_threads_row = JPanel(FlowLayout(FlowLayout.LEFT))
+        max_threads_row.add(JLabel("Max concurrent mirrors:"))
+        self._max_threads_field = JTextField(str(self._max_concurrent_mirrors), 8)
+        self._max_threads_field.setToolTipText("Maximum number of simultaneous mirror requests")
+        max_threads_row.add(self._max_threads_field)
+        max_threads_row.add(JLabel("  (requests skipped when exceeded)"))
+        limits_panel.add(max_threads_row)
+        
+        # Request timeout row
+        timeout_row = JPanel(FlowLayout(FlowLayout.LEFT))
+        timeout_row.add(JLabel("Request timeout (seconds):"))
+        self._timeout_field = JTextField(str(self._request_timeout), 8)
+        self._timeout_field.setToolTipText("How long to wait for mirror responses before timing out")
+        timeout_row.add(self._timeout_field)
+        timeout_row.add(JLabel("  (per mirror request)"))
+        limits_panel.add(timeout_row)
+        
+        # Diff limit row
+        diff_limit_row = JPanel(FlowLayout(FlowLayout.LEFT))
+        diff_limit_row.add(JLabel("Max diff lines:"))
+        self._diff_limit_field = JTextField(str(self._max_diff_lines), 8)
+        self._diff_limit_field.setToolTipText("Maximum lines to show in diff view (prevents UI freeze on large responses)")
+        diff_limit_row.add(self._diff_limit_field)
+        diff_limit_row.add(JLabel("  (prevents UI freeze on large responses)"))
+        limits_panel.add(diff_limit_row)
+        
+        settings.add(limits_panel)
+        settings.add(JLabel(" "))
         
         # Save
         save_panel = JPanel(FlowLayout(FlowLayout.LEFT))
         save_btn = JButton("Save Settings")
         save_btn.addActionListener(lambda e: self._save_settings())
         save_panel.add(save_btn)
+        
+        # Reset to defaults button
+        reset_btn = JButton("Reset to Defaults")
+        reset_btn.addActionListener(lambda e: self._reset_settings_to_defaults())
+        save_panel.add(reset_btn)
+        
         settings.add(save_panel)
         
         panel.add(JScrollPane(settings), BorderLayout.CENTER)
@@ -1588,6 +1641,53 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         self.token_keys = [k.strip() for k in self._token_keys_field.getText().split(",") if k.strip()]
         self.auto_refresh_mirrors = self._auto_refresh_checkbox.isSelected()
         
+        # Resource limits (with validation)
+        try:
+            max_results = int(self._max_results_field.getText().strip())
+            if max_results < 10:
+                max_results = 10
+            elif max_results > 100000:
+                max_results = 100000
+            self._max_results = max_results
+        except:
+            self._log("Invalid max results value, keeping current: " + str(self._max_results))
+        
+        try:
+            max_threads = int(self._max_threads_field.getText().strip())
+            if max_threads < 1:
+                max_threads = 1
+            elif max_threads > 50:
+                max_threads = 50
+            self._max_concurrent_mirrors = max_threads
+        except:
+            self._log("Invalid max threads value, keeping current: " + str(self._max_concurrent_mirrors))
+        
+        try:
+            timeout = int(self._timeout_field.getText().strip())
+            if timeout < 1:
+                timeout = 1
+            elif timeout > 120:
+                timeout = 120
+            self._request_timeout = timeout
+        except:
+            self._log("Invalid timeout value, keeping current: " + str(self._request_timeout))
+        
+        try:
+            diff_lines = int(self._diff_limit_field.getText().strip())
+            if diff_lines < 50:
+                diff_lines = 50
+            elif diff_lines > 10000:
+                diff_lines = 10000
+            self._max_diff_lines = diff_lines
+        except:
+            self._log("Invalid diff lines value, keeping current: " + str(self._max_diff_lines))
+        
+        # Update UI fields to show validated values
+        self._max_results_field.setText(str(self._max_results))
+        self._max_threads_field.setText(str(self._max_concurrent_mirrors))
+        self._timeout_field.setText(str(self._request_timeout))
+        self._diff_limit_field.setText(str(self._max_diff_lines))
+        
         # Log what's enabled
         enabled_tools = []
         if self.mirror_from_proxy: enabled_tools.append("Proxy")
@@ -1596,7 +1696,39 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         if self.mirror_from_intruder: enabled_tools.append("Intruder")
         if self.mirror_from_extender: enabled_tools.append("Extensions")
         
-        self._log("Settings saved. Mirroring from: " + ", ".join(enabled_tools) if enabled_tools else "Settings saved. No tools enabled!")
+        self._log("Settings saved. Tools: " + (", ".join(enabled_tools) if enabled_tools else "NONE"))
+        self._log("  Limits: max_results={}, max_threads={}, timeout={}s, diff_lines={}".format(
+            self._max_results, self._max_concurrent_mirrors, self._request_timeout, self._max_diff_lines))
+    
+    def _reset_settings_to_defaults(self):
+        """Reset all settings to default values"""
+        # Tool interception
+        self._proxy_checkbox.setSelected(True)
+        self._repeater_checkbox.setSelected(False)
+        self._scanner_checkbox.setSelected(False)
+        self._intruder_checkbox.setSelected(False)
+        self._extender_checkbox.setSelected(False)
+        
+        # Patterns
+        default_login = ["/login", "/signin", "/auth", "/authenticate", "/oauth", 
+                        "/token", "/session", "/api/login", "/api/auth", "/api/token"]
+        default_refresh = ["/refresh", "/token/refresh", "/auth/refresh"]
+        default_tokens = ["access_token", "accessToken", "token", "id_token", "jwt", "bearer"]
+        
+        self._login_patterns_field.setText(", ".join(default_login))
+        self._refresh_patterns_field.setText(", ".join(default_refresh))
+        self._token_keys_field.setText(", ".join(default_tokens))
+        
+        # Options
+        self._auto_refresh_checkbox.setSelected(True)
+        
+        # Resource limits
+        self._max_results_field.setText("1000")
+        self._max_threads_field.setText("10")
+        self._timeout_field.setText("15")
+        self._diff_limit_field.setText("500")
+        
+        self._log("Settings reset to defaults (click Save to apply)")
     
     def _build_log_panel(self):
         """Build log panel"""
@@ -2287,7 +2419,7 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                     mirror_service = self._helpers.buildHttpService(mirror_domain, port, use_https)
                     
                     # Make the request WITH TIMEOUT
-                    mirror_resp, error = self._make_request_with_timeout(mirror_service, mirrored_req, 15)
+                    mirror_resp, error = self._make_request_with_timeout(mirror_service, mirrored_req, self._request_timeout)
                     
                     if error:
                         self._log("ERROR for " + mirror_domain + ": " + error)
@@ -2513,7 +2645,7 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                     
                     # Make request with timeout
                     mirror_service = self._helpers.buildHttpService(mirror_domain, mirror_port, use_https)
-                    mirror_resp, error = self._make_request_with_timeout(mirror_service, mirrored_req, 15)
+                    mirror_resp, error = self._make_request_with_timeout(mirror_service, mirrored_req, self._request_timeout)
                     
                     if error:
                         self._debug_print("Request error: " + error)
