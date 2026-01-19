@@ -1782,6 +1782,38 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                 self.results.remove(0)  # Remove oldest
             self.results.add(result)
     
+    def _refresh_domain_table(self):
+        """Refresh domain table while preserving selection"""
+        def do_refresh():
+            # Save selection
+            selected_row = self._domain_table.getSelectedRow()
+            
+            # Refresh
+            self._domain_model.fireTableDataChanged()
+            
+            # Restore selection if valid
+            if selected_row >= 0 and selected_row < self._domain_model.getRowCount():
+                self._domain_table.setRowSelectionInterval(selected_row, selected_row)
+        
+        SwingUtilities.invokeLater(do_refresh)
+    
+    def _refresh_results_table(self):
+        """Refresh results table while preserving selection"""
+        def do_refresh():
+            # Save selection
+            selected_row = self._results_table.getSelectedRow()
+            
+            # Refresh
+            self._results_model.fireTableDataChanged()
+            if hasattr(self, '_update_results_count'):
+                self._update_results_count()
+            
+            # Restore selection if valid
+            if selected_row >= 0 and selected_row < self._results_model.getRowCount():
+                self._results_table.setRowSelectionInterval(selected_row, selected_row)
+        
+        SwingUtilities.invokeLater(do_refresh)
+    
     def _can_start_mirror_thread(self):
         """Check if we can start another mirror thread"""
         with self._mirror_thread_lock:
@@ -2149,7 +2181,7 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         
         if updated:
             self._update_session_status(session, auth_mode)
-            SwingUtilities.invokeLater(lambda: self._domain_model.fireTableDataChanged())
+            self._refresh_domain_table()
     
     def _capture_from_response(self, host, request, response, entry):
         """Capture session from response"""
@@ -2197,7 +2229,7 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         
         if updated:
             self._update_session_status(session, auth_mode)
-            SwingUtilities.invokeLater(lambda: self._domain_model.fireTableDataChanged())
+            self._refresh_domain_table()
             SwingUtilities.invokeLater(lambda: self._update_session_detail())
         
         # Trigger mirror refresh
@@ -2399,6 +2431,13 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
             
             for mirror_entry in mirrors:
                 mirror_domain = mirror_entry["domain"]
+                mirror_session = mirror_entry["session"]
+                
+                # Warn if mirror has no session (likely to cause 302s)
+                if not mirror_session.get("cookies") and not mirror_session.get("bearer"):
+                    self._log("WARNING: " + mirror_domain + " has no captured session! May get 302 redirects.")
+                    self._log("  -> Browse to https://" + mirror_domain + " and log in first")
+                
                 self._log("Mirroring to: " + mirror_domain)
                 
                 try:
@@ -2453,7 +2492,11 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                     # Capture session from response
                     self._capture_from_response(mirror_domain, mirrored_req, resp_bytes, mirror_entry)
                     
-                    self._log("Successfully mirrored to " + mirror_domain + " (status: " + str(mir_info.getStatusCode()) + ")")
+                    mir_status = mir_info.getStatusCode()
+                    if mir_status in [301, 302, 303, 307, 308]:
+                        self._log("Mirrored to " + mirror_domain + ": " + str(mir_status) + " (REDIRECT - session issue?)")
+                    else:
+                        self._log("Mirrored to " + mirror_domain + ": " + str(mir_status))
                 
                 except Exception as e:
                     self._log("ERROR mirroring to " + mirror_domain + ": " + str(e))
@@ -2507,6 +2550,16 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         session = mirror_entry["session"]
         auth_mode = mirror_entry["auth_mode"]
         
+        # Debug: Show what session data we have for this mirror
+        self._debug_print("Mirror domain: " + mirror_domain)
+        self._debug_print("  Auth mode: " + str(auth_mode))
+        self._debug_print("  Session status: " + str(session.get("status", "unknown")))
+        self._debug_print("  Has cookies: " + str(bool(session.get("cookies"))))
+        if session.get("cookies"):
+            self._debug_print("  Cookie count: " + str(len(session["cookies"])))
+            self._debug_print("  Cookie names: " + ", ".join(session["cookies"].keys()))
+        self._debug_print("  Has bearer: " + str(bool(session.get("bearer"))))
+        
         new_headers = []
         has_auth = False
         has_cookie = False
@@ -2520,22 +2573,32 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                 has_auth = True
                 if auth_mode in [AUTH_AUTO, AUTH_BEARER, AUTH_BOTH] and session.get("bearer"):
                     new_headers.append("Authorization: Bearer " + session["bearer"])
+                    self._debug_print("  Using mirror's bearer token")
                 elif auth_mode == AUTH_NONE:
+                    self._debug_print("  Skipping auth (mode=NONE)")
                     pass  # Don't add auth
                 elif auth_mode == AUTH_COOKIES:
+                    self._debug_print("  Skipping auth (mode=COOKIES)")
                     pass  # Don't add bearer
                 else:
                     new_headers.append(header)
+                    self._debug_print("  WARNING: Using original auth header (no mirror token)")
             elif header.lower().startswith("cookie:"):
                 has_cookie = True
                 if auth_mode in [AUTH_AUTO, AUTH_COOKIES, AUTH_BOTH] and session.get("cookies"):
                     cookie_str = "; ".join([k + "=" + v for k, v in session["cookies"].items()])
                     new_headers.append("Cookie: " + cookie_str)
+                    self._debug_print("  Using mirror's cookies: " + cookie_str[:100] + "...")
                 elif auth_mode == AUTH_NONE:
+                    self._debug_print("  Skipping cookies (mode=NONE)")
                     pass  # Don't add cookies
                 elif auth_mode == AUTH_BEARER:
+                    self._debug_print("  Skipping cookies (mode=BEARER)")
                     pass  # Don't add cookies
                 else:
+                    # WARNING: This uses the PRIMARY domain's cookies!
+                    self._debug_print("  WARNING: No mirror cookies - using original (primary) cookies!")
+                    self._debug_print("  Original cookie: " + header[:100])
                     new_headers.append(header)
             elif header.lower().startswith(mirror_entry.get("custom_header_name", "").lower() + ":"):
                 # Replace custom header if configured
@@ -2550,11 +2613,13 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         if auth_mode in [AUTH_AUTO, AUTH_BEARER, AUTH_BOTH]:
             if not has_auth and session.get("bearer"):
                 new_headers.append("Authorization: Bearer " + session["bearer"])
+                self._debug_print("  Added missing bearer token")
         
         if auth_mode in [AUTH_AUTO, AUTH_COOKIES, AUTH_BOTH]:
             if not has_cookie and session.get("cookies"):
                 cookie_str = "; ".join([k + "=" + v for k, v in session["cookies"].items()])
                 new_headers.append("Cookie: " + cookie_str)
+                self._debug_print("  Added missing cookies: " + cookie_str[:100] + "...")
         
         if auth_mode == AUTH_CUSTOM:
             header_name = mirror_entry.get("custom_header_name", "")
@@ -2628,6 +2693,12 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
             # Mirror to each domain
             for mirror_entry in mirrors:
                 mirror_domain = mirror_entry["domain"]
+                mirror_session = mirror_entry["session"]
+                
+                # Warn if mirror has no session (likely to cause 302s)
+                if not mirror_session.get("cookies") and not mirror_session.get("bearer"):
+                    self._log("WARNING: " + mirror_domain + " has no captured session! May get 302 redirects.")
+                
                 self._debug_print("Mirroring to: " + mirror_domain)
                 
                 try:
@@ -2684,7 +2755,11 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
                     except:
                         pass  # Don't fail mirroring due to session capture
                     
-                    self._log("Mirrored to " + mirror_domain + ": " + str(mir_status))
+                    # Log with warning for redirects
+                    if mir_status in [301, 302, 303, 307, 308]:
+                        self._log("Mirrored to " + mirror_domain + ": " + str(mir_status) + " (REDIRECT - session issue?)")
+                    else:
+                        self._log("Mirrored to " + mirror_domain + ": " + str(mir_status))
                 
                 except Exception as e:
                     self._debug_print("Exception mirroring to " + mirror_domain + ": " + str(e))
