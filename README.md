@@ -167,6 +167,16 @@ The extension compares:
 3. Try clicking "Refresh All Sessions"
 4. Verify auth mode is appropriate for your application
 
+### Getting 302 Redirects on Mirrors
+This means the mirror domain isn't recognizing the session:
+1. Enable **Debug Logging** in the Logs tab
+2. Look for messages like:
+   - `WARNING: domain.com has no captured session!`
+   - `WARNING: No mirror cookies - using original (primary) cookies!`
+3. **Fix**: Browse directly to the mirror domain and log in
+4. Check the Domains tab shows session info for that domain
+5. The extension will warn you in the logs about 302s: `302 (REDIRECT - session issue?)`
+
 ### Timeout Errors
 1. Verify mirror domain is accessible from your machine
 2. Check firewall/proxy settings
@@ -184,6 +194,18 @@ Consider:
 - Saving sessions and clearing
 - Reducing max stored results for long sessions
 - Disabling Scanner/Intruder mirroring for high-volume scans
+
+### UI Freezing When Clicking Results
+Large responses can cause temporary freezes. The extension mitigates this by:
+- Processing diffs in background threads
+- Showing "Loading..." while processing
+- Limiting diff body size to 100KB
+- Limiting side-by-side to 50KB
+
+If you still experience freezes:
+- Reduce "Max diff lines" in Settings
+- Use the Summary tab for quick overviews
+- Large responses (>100KB) will show truncation warnings
 
 ### Extension Causing Issues
 1. Disable mirroring first (uncheck "Enable Mirroring")
@@ -213,6 +235,17 @@ All limits can be adjusted in the Settings tab:
 - UI updates via SwingUtilities.invokeLater()
 - All threads marked as daemon (won't prevent Burp exit)
 - Safe concurrent access to domains and results
+
+### Performance Optimizations
+The extension uses several techniques to prevent UI freezes:
+- **Background Processing**: Diff calculations run in background threads
+- **Loading Indicators**: "Loading..." shown immediately while processing
+- **Size Limits**: 
+  - Diff calculation limited to 100KB per body
+  - Side-by-side comparison limited to 50KB per body
+  - Larger responses are truncated with a warning
+- **Lazy Loading**: Heavy tabs only process when selected
+- **Configurable Limits**: Adjust max diff lines in Settings
 
 ## Export Formats
 

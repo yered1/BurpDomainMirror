@@ -853,12 +853,12 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         selector_panel = JPanel(FlowLayout(FlowLayout.LEFT))
         selector_panel.add(JLabel("Left:"))
         self._left_domain_combo = JComboBox(["Select..."])
-        self._left_domain_combo.addActionListener(lambda e: self._update_side_by_side())
+        self._left_domain_combo.addActionListener(lambda e: self._trigger_side_by_side_update())
         selector_panel.add(self._left_domain_combo)
         
         selector_panel.add(JLabel("   Right:"))
         self._right_domain_combo = JComboBox(["Select..."])
-        self._right_domain_combo.addActionListener(lambda e: self._update_side_by_side())
+        self._right_domain_combo.addActionListener(lambda e: self._trigger_side_by_side_update())
         selector_panel.add(self._right_domain_combo)
         
         # Add sync scroll checkbox
@@ -1059,7 +1059,7 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
             self._left_domain_combo.setSelectedIndex(0)
             self._right_domain_combo.setSelectedIndex(1)
         
-        # === SUMMARY TAB ===
+        # === SUMMARY TAB (fast, do immediately) ===
         text = "REQUEST: " + result.get("method", "") + " " + result.get("path", "") + "\n"
         text += "TIME: " + result.get("timestamp", "") + "\n"
         text += "MATCH: " + ("YES - All responses identical" if result.get("match") else "NO - Differences detected!") + "\n"
@@ -1096,146 +1096,174 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
         
         self._response_area.setText(text)
         
-        # === DIFF TAB ===
-        self._update_diff_view(result, responses, domains)
+        # === DIFF TAB (heavy - do in background) ===
+        # Show loading indicator immediately
+        self._diff_area.setText("Loading diff... (large responses may take a moment)")
         
-        # === SIDE BY SIDE ===
-        self._update_side_by_side()
+        # Process in background thread
+        def compute_diff():
+            self._update_diff_view(result, responses, domains)
+        
+        t = Thread(target=compute_diff)
+        t.daemon = True
+        t.start()
+        
+        # === SIDE BY SIDE (heavy - do in background) ===
+        # Show loading indicator immediately
+        self._left_response_area.setText("Loading...")
+        self._right_response_area.setText("Loading...")
+        
+        def compute_side_by_side():
+            self._update_side_by_side()
+        
+        t2 = Thread(target=compute_side_by_side)
+        t2.daemon = True
+        t2.start()
     
     def _update_diff_view(self, result, responses, domains):
-        """Update the diff view with highlighted differences"""
-        doc = self._diff_area.getStyledDocument()
-        
-        # Clear existing content
-        doc.remove(0, doc.getLength())
-        
-        # Define styles
-        style_context = StyleContext.getDefaultStyleContext()
-        
-        # Normal text
-        normal_style = style_context.addStyle("normal", None)
-        StyleConstants.setFontFamily(normal_style, "Monospaced")
-        StyleConstants.setFontSize(normal_style, 11)
-        
-        # Header style
-        header_style = style_context.addStyle("header", None)
-        StyleConstants.setFontFamily(header_style, "Monospaced")
-        StyleConstants.setFontSize(header_style, 11)
-        StyleConstants.setBold(header_style, True)
-        StyleConstants.setForeground(header_style, Color(0, 0, 150))
-        
-        # Added (in right but not left) - green background
-        added_style = style_context.addStyle("added", None)
-        StyleConstants.setFontFamily(added_style, "Monospaced")
-        StyleConstants.setFontSize(added_style, 11)
-        StyleConstants.setBackground(added_style, Color(200, 255, 200))
-        StyleConstants.setForeground(added_style, Color(0, 100, 0))
-        
-        # Removed (in left but not right) - red background
-        removed_style = style_context.addStyle("removed", None)
-        StyleConstants.setFontFamily(removed_style, "Monospaced")
-        StyleConstants.setFontSize(removed_style, 11)
-        StyleConstants.setBackground(removed_style, Color(255, 200, 200))
-        StyleConstants.setForeground(removed_style, Color(150, 0, 0))
-        
-        # Changed - yellow background
-        changed_style = style_context.addStyle("changed", None)
-        StyleConstants.setFontFamily(changed_style, "Monospaced")
-        StyleConstants.setFontSize(changed_style, 11)
-        StyleConstants.setBackground(changed_style, Color(255, 255, 150))
-        
-        # Separator
-        sep_style = style_context.addStyle("separator", None)
-        StyleConstants.setFontFamily(sep_style, "Monospaced")
-        StyleConstants.setFontSize(sep_style, 11)
-        StyleConstants.setForeground(sep_style, Color(100, 100, 100))
-        
-        if result.get("match"):
-            doc.insertString(doc.getLength(), "All responses are IDENTICAL\n\n", header_style)
-            doc.insertString(doc.getLength(), "Hash: " + list(responses.values())[0].get("hash", ""), normal_style)
-            return
-        
-        # Show diff header
-        doc.insertString(doc.getLength(), "DIFFERENCES DETECTED\n", header_style)
-        doc.insertString(doc.getLength(), "=" * 70 + "\n\n", sep_style)
-        
-        # Compare each pair of responses
-        if len(domains) >= 2:
-            primary_domain = domains[0]
-            primary_data = responses[primary_domain]
-            primary_body = primary_data.get("body", "")
+        """Update the diff view with highlighted differences - runs in background thread"""
+        try:
+            # Pre-compute all the diff content in background thread
+            diff_content = []  # List of (text, style_name) tuples
             
-            for other_domain in domains[1:]:
-                other_data = responses[other_domain]
-                other_body = other_data.get("body", "")
+            if result.get("match"):
+                diff_content.append(("All responses are IDENTICAL\n\n", "header"))
+                diff_content.append(("Hash: " + list(responses.values())[0].get("hash", ""), "normal"))
+            else:
+                diff_content.append(("DIFFERENCES DETECTED\n", "header"))
+                diff_content.append(("=" * 70 + "\n\n", "separator"))
                 
-                doc.insertString(doc.getLength(), 
-                    "Comparing: {} vs {}\n".format(primary_domain, other_domain), header_style)
-                doc.insertString(doc.getLength(), "-" * 70 + "\n", sep_style)
-                
-                # Status comparison
-                if primary_data.get("status") != other_data.get("status"):
-                    doc.insertString(doc.getLength(), "Status: ", normal_style)
-                    doc.insertString(doc.getLength(), str(primary_data.get("status")), removed_style)
-                    doc.insertString(doc.getLength(), " vs ", normal_style)
-                    doc.insertString(doc.getLength(), str(other_data.get("status")), added_style)
-                    doc.insertString(doc.getLength(), "\n", normal_style)
-                
-                # Size comparison
-                if primary_data.get("size") != other_data.get("size"):
-                    doc.insertString(doc.getLength(), "Size: ", normal_style)
-                    doc.insertString(doc.getLength(), str(primary_data.get("size")), removed_style)
-                    doc.insertString(doc.getLength(), " vs ", normal_style)
-                    doc.insertString(doc.getLength(), str(other_data.get("size")), added_style)
-                    doc.insertString(doc.getLength(), "\n", normal_style)
-                
-                doc.insertString(doc.getLength(), "\n", normal_style)
-                
-                # Generate unified diff
-                primary_lines = primary_body.splitlines(keepends=True)
-                other_lines = other_body.splitlines(keepends=True)
-                
-                diff = list(difflib.unified_diff(
-                    primary_lines, 
-                    other_lines,
-                    fromfile=primary_domain,
-                    tofile=other_domain,
-                    lineterm=''
-                ))
-                
-                if diff:
-                    doc.insertString(doc.getLength(), "UNIFIED DIFF:\n", header_style)
+                # Compare each pair of responses
+                if len(domains) >= 2:
+                    primary_domain = domains[0]
+                    primary_data = responses[primary_domain]
+                    primary_body = primary_data.get("body", "")
                     
-                    diff_line_count = 0
+                    # Limit body size for diff calculation to prevent massive memory usage
+                    max_diff_body_size = 100000  # 100KB limit for diff calculation
+                    if len(primary_body) > max_diff_body_size:
+                        primary_body = primary_body[:max_diff_body_size]
+                        diff_content.append(("WARNING: Primary body truncated to {}KB for diff\n\n".format(max_diff_body_size // 1000), "separator"))
                     
-                    for line in diff:
-                        if diff_line_count >= self._max_diff_lines:
-                            doc.insertString(doc.getLength(), 
-                                "\n... [diff truncated, showing first {} lines]\n".format(self._max_diff_lines), 
-                                sep_style)
-                            break
+                    for other_domain in domains[1:]:
+                        other_data = responses[other_domain]
+                        other_body = other_data.get("body", "")
                         
-                        if line.startswith('+++') or line.startswith('---'):
-                            doc.insertString(doc.getLength(), line + "\n", header_style)
-                        elif line.startswith('@@'):
-                            doc.insertString(doc.getLength(), line + "\n", sep_style)
-                        elif line.startswith('+'):
-                            doc.insertString(doc.getLength(), line + "\n", added_style)
-                        elif line.startswith('-'):
-                            doc.insertString(doc.getLength(), line + "\n", removed_style)
+                        if len(other_body) > max_diff_body_size:
+                            other_body = other_body[:max_diff_body_size]
+                        
+                        diff_content.append(("Comparing: {} vs {}\n".format(primary_domain, other_domain), "header"))
+                        diff_content.append(("-" * 70 + "\n", "separator"))
+                        
+                        # Status comparison
+                        if primary_data.get("status") != other_data.get("status"):
+                            diff_content.append(("Status: ", "normal"))
+                            diff_content.append((str(primary_data.get("status")), "removed"))
+                            diff_content.append((" vs ", "normal"))
+                            diff_content.append((str(other_data.get("status")), "added"))
+                            diff_content.append(("\n", "normal"))
+                        
+                        # Size comparison
+                        if primary_data.get("size") != other_data.get("size"):
+                            diff_content.append(("Size: ", "normal"))
+                            diff_content.append((str(primary_data.get("size")), "removed"))
+                            diff_content.append((" vs ", "normal"))
+                            diff_content.append((str(other_data.get("size")), "added"))
+                            diff_content.append(("\n", "normal"))
+                        
+                        diff_content.append(("\n", "normal"))
+                        
+                        # Generate unified diff
+                        primary_lines = primary_body.splitlines(keepends=True)
+                        other_lines = other_body.splitlines(keepends=True)
+                        
+                        diff = list(difflib.unified_diff(
+                            primary_lines, 
+                            other_lines,
+                            fromfile=primary_domain,
+                            tofile=other_domain,
+                            lineterm=''
+                        ))
+                        
+                        if diff:
+                            diff_content.append(("UNIFIED DIFF:\n", "header"))
+                            
+                            diff_line_count = 0
+                            
+                            for line in diff:
+                                if diff_line_count >= self._max_diff_lines:
+                                    diff_content.append((
+                                        "\n... [diff truncated, showing first {} lines]\n".format(self._max_diff_lines), 
+                                        "separator"
+                                    ))
+                                    break
+                                
+                                if line.startswith('+++') or line.startswith('---'):
+                                    diff_content.append((line + "\n", "header"))
+                                elif line.startswith('@@'):
+                                    diff_content.append((line + "\n", "separator"))
+                                elif line.startswith('+'):
+                                    diff_content.append((line + "\n", "added"))
+                                elif line.startswith('-'):
+                                    diff_content.append((line + "\n", "removed"))
+                                else:
+                                    diff_content.append((line + "\n", "normal"))
+                                
+                                diff_line_count += 1
                         else:
-                            doc.insertString(doc.getLength(), line + "\n", normal_style)
+                            diff_content.append(("Body content is identical (difference may be in headers)\n", "normal"))
                         
-                        diff_line_count += 1
-                else:
-                    # Bodies are same but something else differs
-                    doc.insertString(doc.getLength(), 
-                        "Response bodies appear identical (diff in metadata only)\n", normal_style)
-                
-                doc.insertString(doc.getLength(), "\n" + "=" * 70 + "\n\n", sep_style)
-        
-        # Move to top
-        self._diff_area.setCaretPosition(0)
+                        diff_content.append(("\n" + "=" * 70 + "\n\n", "separator"))
+            
+            # Now update UI on EDT
+            def update_ui():
+                try:
+                    doc = self._diff_area.getStyledDocument()
+                    doc.remove(0, doc.getLength())
+                    
+                    # Define styles
+                    style_context = StyleContext.getDefaultStyleContext()
+                    
+                    styles = {}
+                    styles["normal"] = style_context.addStyle("normal", None)
+                    StyleConstants.setFontFamily(styles["normal"], "Monospaced")
+                    StyleConstants.setFontSize(styles["normal"], 11)
+                    
+                    styles["header"] = style_context.addStyle("header", None)
+                    StyleConstants.setFontFamily(styles["header"], "Monospaced")
+                    StyleConstants.setFontSize(styles["header"], 11)
+                    StyleConstants.setBold(styles["header"], True)
+                    StyleConstants.setForeground(styles["header"], Color(0, 0, 150))
+                    
+                    styles["added"] = style_context.addStyle("added", None)
+                    StyleConstants.setFontFamily(styles["added"], "Monospaced")
+                    StyleConstants.setFontSize(styles["added"], 11)
+                    StyleConstants.setBackground(styles["added"], Color(200, 255, 200))
+                    StyleConstants.setForeground(styles["added"], Color(0, 100, 0))
+                    
+                    styles["removed"] = style_context.addStyle("removed", None)
+                    StyleConstants.setFontFamily(styles["removed"], "Monospaced")
+                    StyleConstants.setFontSize(styles["removed"], 11)
+                    StyleConstants.setBackground(styles["removed"], Color(255, 200, 200))
+                    StyleConstants.setForeground(styles["removed"], Color(150, 0, 0))
+                    
+                    styles["separator"] = style_context.addStyle("separator", None)
+                    StyleConstants.setFontFamily(styles["separator"], "Monospaced")
+                    StyleConstants.setFontSize(styles["separator"], 11)
+                    StyleConstants.setForeground(styles["separator"], Color(100, 100, 100))
+                    
+                    # Apply pre-computed content
+                    for text, style_name in diff_content:
+                        doc.insertString(doc.getLength(), text, styles.get(style_name, styles["normal"]))
+                except Exception as e:
+                    self._debug_print("Error updating diff UI: " + str(e))
+            
+            SwingUtilities.invokeLater(update_ui)
+            
+        except Exception as e:
+            def show_error():
+                self._diff_area.setText("Error computing diff: " + str(e))
+            SwingUtilities.invokeLater(show_error)
     
     def _show_selected_response(self):
         """Show the full response for selected domain"""
@@ -1261,95 +1289,159 @@ class BurpExtender(IBurpExtender, ITab, IProxyListener, IHttpListener):
             self._full_body_area.setText(text)
             self._full_body_area.setCaretPosition(0)
     
+    def _trigger_side_by_side_update(self):
+        """Trigger side-by-side update with loading indicator"""
+        # Show loading immediately
+        self._left_response_area.setText("Loading...")
+        self._right_response_area.setText("Loading...")
+        
+        # Run update in background
+        def do_update():
+            self._update_side_by_side()
+        
+        t = Thread(target=do_update)
+        t.daemon = True
+        t.start()
+    
     def _update_side_by_side(self):
-        """Update side-by-side comparison view with highlighting"""
-        if not self._current_result:
-            return
-        
-        left_domain = self._left_domain_combo.getSelectedItem()
-        right_domain = self._right_domain_combo.getSelectedItem()
-        
-        if not left_domain or not right_domain:
-            return
-        
-        responses = self._current_result.get("responses", {})
-        
-        left_data = responses.get(left_domain, {})
-        right_data = responses.get(right_domain, {})
-        
-        left_body = left_data.get("body", "")
-        right_body = right_data.get("body", "")
-        
-        # Get styled documents
-        left_doc = self._left_response_area.getStyledDocument()
-        right_doc = self._right_response_area.getStyledDocument()
-        
-        # Clear
-        left_doc.remove(0, left_doc.getLength())
-        right_doc.remove(0, right_doc.getLength())
-        
-        # Define styles
-        style_context = StyleContext.getDefaultStyleContext()
-        
-        normal_style = style_context.addStyle("normal", None)
-        StyleConstants.setFontFamily(normal_style, "Monospaced")
-        StyleConstants.setFontSize(normal_style, 10)
-        
-        diff_style = style_context.addStyle("diff", None)
-        StyleConstants.setFontFamily(diff_style, "Monospaced")
-        StyleConstants.setFontSize(diff_style, 10)
-        StyleConstants.setBackground(diff_style, Color(255, 255, 150))
-        
-        header_style = style_context.addStyle("header", None)
-        StyleConstants.setFontFamily(header_style, "Monospaced")
-        StyleConstants.setFontSize(header_style, 10)
-        StyleConstants.setBold(header_style, True)
-        
-        # Add headers
-        left_header = "Status: {} | Size: {} | Hash: {}\n{}\n\n".format(
-            left_data.get("status", "?"),
-            left_data.get("size", 0),
-            left_data.get("hash", "")[:12],
-            "=" * 40
-        )
-        right_header = "Status: {} | Size: {} | Hash: {}\n{}\n\n".format(
-            right_data.get("status", "?"),
-            right_data.get("size", 0),
-            right_data.get("hash", "")[:12],
-            "=" * 40
-        )
-        
-        left_doc.insertString(0, left_header, header_style)
-        right_doc.insertString(0, right_header, header_style)
-        
-        # Split into lines and compare
-        left_lines = left_body.splitlines()
-        right_lines = right_body.splitlines()
-        
-        # Use SequenceMatcher to find differences
-        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
-        
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'equal':
-                for line in left_lines[i1:i2]:
-                    left_doc.insertString(left_doc.getLength(), line + "\n", normal_style)
-                for line in right_lines[j1:j2]:
-                    right_doc.insertString(right_doc.getLength(), line + "\n", normal_style)
-            elif tag == 'replace':
-                for line in left_lines[i1:i2]:
-                    left_doc.insertString(left_doc.getLength(), line + "\n", diff_style)
-                for line in right_lines[j1:j2]:
-                    right_doc.insertString(right_doc.getLength(), line + "\n", diff_style)
-            elif tag == 'delete':
-                for line in left_lines[i1:i2]:
-                    left_doc.insertString(left_doc.getLength(), line + "\n", diff_style)
-            elif tag == 'insert':
-                for line in right_lines[j1:j2]:
-                    right_doc.insertString(right_doc.getLength(), line + "\n", diff_style)
-        
-        # Move to top
-        self._left_response_area.setCaretPosition(0)
-        self._right_response_area.setCaretPosition(0)
+        """Update side-by-side comparison view with highlighting - runs in background thread"""
+        try:
+            if not self._current_result:
+                return
+            
+            # Get values on current thread (may or may not be EDT)
+            left_domain = self._left_domain_combo.getSelectedItem()
+            right_domain = self._right_domain_combo.getSelectedItem()
+            
+            if not left_domain or not right_domain:
+                return
+            
+            responses = self._current_result.get("responses", {})
+            
+            left_data = responses.get(left_domain, {})
+            right_data = responses.get(right_domain, {})
+            
+            left_body = left_data.get("body", "")
+            right_body = right_data.get("body", "")
+            
+            # Limit body size for comparison to prevent freezing
+            max_side_by_side_size = 50000  # 50KB limit for side-by-side
+            left_truncated = False
+            right_truncated = False
+            
+            if len(left_body) > max_side_by_side_size:
+                left_body = left_body[:max_side_by_side_size]
+                left_truncated = True
+            if len(right_body) > max_side_by_side_size:
+                right_body = right_body[:max_side_by_side_size]
+                right_truncated = True
+            
+            # Build headers
+            left_header = "Status: {} | Size: {} | Hash: {}\n{}\n".format(
+                left_data.get("status", "?"),
+                left_data.get("size", 0),
+                left_data.get("hash", "")[:12],
+                "=" * 40
+            )
+            if left_truncated:
+                left_header += "(truncated to 50KB for display)\n"
+            left_header += "\n"
+            
+            right_header = "Status: {} | Size: {} | Hash: {}\n{}\n".format(
+                right_data.get("status", "?"),
+                right_data.get("size", 0),
+                right_data.get("hash", "")[:12],
+                "=" * 40
+            )
+            if right_truncated:
+                right_header += "(truncated to 50KB for display)\n"
+            right_header += "\n"
+            
+            # Pre-compute the comparison in background
+            left_content = []  # (text, is_diff) tuples
+            right_content = []
+            
+            left_content.append((left_header, False))
+            right_content.append((right_header, False))
+            
+            # Split into lines and compare
+            left_lines = left_body.splitlines()
+            right_lines = right_body.splitlines()
+            
+            # Use SequenceMatcher to find differences
+            matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
+            
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'equal':
+                    for line in left_lines[i1:i2]:
+                        left_content.append((line + "\n", False))
+                    for line in right_lines[j1:j2]:
+                        right_content.append((line + "\n", False))
+                elif tag == 'replace':
+                    for line in left_lines[i1:i2]:
+                        left_content.append((line + "\n", True))
+                    for line in right_lines[j1:j2]:
+                        right_content.append((line + "\n", True))
+                elif tag == 'delete':
+                    for line in left_lines[i1:i2]:
+                        left_content.append((line + "\n", True))
+                elif tag == 'insert':
+                    for line in right_lines[j1:j2]:
+                        right_content.append((line + "\n", True))
+            
+            # Now update UI on EDT
+            def update_ui():
+                try:
+                    left_doc = self._left_response_area.getStyledDocument()
+                    right_doc = self._right_response_area.getStyledDocument()
+                    
+                    left_doc.remove(0, left_doc.getLength())
+                    right_doc.remove(0, right_doc.getLength())
+                    
+                    # Define styles
+                    style_context = StyleContext.getDefaultStyleContext()
+                    
+                    normal_style = style_context.addStyle("normal", None)
+                    StyleConstants.setFontFamily(normal_style, "Monospaced")
+                    StyleConstants.setFontSize(normal_style, 10)
+                    
+                    diff_style = style_context.addStyle("diff", None)
+                    StyleConstants.setFontFamily(diff_style, "Monospaced")
+                    StyleConstants.setFontSize(diff_style, 10)
+                    StyleConstants.setBackground(diff_style, Color(255, 255, 150))
+                    
+                    header_style = style_context.addStyle("header", None)
+                    StyleConstants.setFontFamily(header_style, "Monospaced")
+                    StyleConstants.setFontSize(header_style, 10)
+                    StyleConstants.setBold(header_style, True)
+                    
+                    # Apply left content
+                    for i, (text, is_diff) in enumerate(left_content):
+                        if i == 0:  # Header
+                            left_doc.insertString(left_doc.getLength(), text, header_style)
+                        else:
+                            left_doc.insertString(left_doc.getLength(), text, diff_style if is_diff else normal_style)
+                    
+                    # Apply right content
+                    for i, (text, is_diff) in enumerate(right_content):
+                        if i == 0:  # Header
+                            right_doc.insertString(right_doc.getLength(), text, header_style)
+                        else:
+                            right_doc.insertString(right_doc.getLength(), text, diff_style if is_diff else normal_style)
+                    
+                    # Move to top
+                    self._left_response_area.setCaretPosition(0)
+                    self._right_response_area.setCaretPosition(0)
+                except Exception as e:
+                    self._debug_print("Error updating side-by-side UI: " + str(e))
+            
+            SwingUtilities.invokeLater(update_ui)
+            
+        except Exception as e:
+            def show_error():
+                self._left_response_area.setText("Error: " + str(e))
+                self._right_response_area.setText("Error: " + str(e))
+            SwingUtilities.invokeLater(show_error)
     
     def _export_diff_report(self):
         """Export detailed diff report"""
